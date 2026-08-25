@@ -1,4 +1,10 @@
 package benoit.kevin.expensetracker.domain.user;
 
-public record UserId(long id) {
+import java.util.Objects;
+import java.util.UUID;
+
+public record UserId(UUID id) {
+    public UserId {
+        Objects.requireNonNull(id);
+    }
 }

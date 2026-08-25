@@ -1,4 +1,16 @@
 package benoit.kevin.expensetracker.domain.budget;
 
-public record Budget(BudgetId id, long total) {
+import benoit.kevin.expensetracker.domain.money.Money;
+import benoit.kevin.expensetracker.domain.period.Period;
+import benoit.kevin.expensetracker.domain.user.UserId;
+
+import java.util.Objects;
+
+public record Budget(BudgetId budgetId, UserId ownerId, Period period, Money total) {
+    public Budget{
+        Objects.requireNonNull(budgetId);
+        Objects.requireNonNull(ownerId);
+        Objects.requireNonNull(period);
+        Objects.requireNonNull(total);
+    }
 }

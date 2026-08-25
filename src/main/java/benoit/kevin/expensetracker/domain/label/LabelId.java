@@ -1,4 +1,10 @@
 package benoit.kevin.expensetracker.domain.label;
 
-public record LabelId(long id) {
+import java.util.Objects;
+import java.util.UUID;
+
+public record LabelId(UUID id) {
+    public LabelId {
+        Objects.requireNonNull(id);
+    }
 }
