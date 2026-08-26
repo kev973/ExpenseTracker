@@ -6,7 +6,11 @@ import benoit.kevin.expensetracker.domain.user.UserId;
 import java.time.LocalDate;
 import java.util.Objects;
 
-public record Refund(TransactionId transactionId, TransactionId expenseId, UserId userId, Money amount, String description, LocalDate date) implements Transaction {
+/**
+ * Refund's budgetId and labelId are derived from ExpenseId.
+ */
+public record Refund(TransactionId transactionId, TransactionId expenseId,
+                     UserId userId, Money amount, String description, LocalDate date) implements Transaction {
     public Refund {
         Objects.requireNonNull(transactionId);
         Objects.requireNonNull(expenseId);

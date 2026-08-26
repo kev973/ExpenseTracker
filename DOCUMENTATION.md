@@ -12,7 +12,7 @@ per category, before the end of this period?
 | Term | Meaning |
 | --- | --- |
 | User | Owner of budgets. Authenticated. |
-| Budget | A plan attached to a period, with a global total amount. |
+| Budget | A plan attached to a period, holding one envelope per label. |
 | Period | The time window of a budget: a start date and an end date. |
 | Transaction | A dated movement of money. An Expense, an Income or a Refund. |
 | Income | Money entering the budget. Raises the available amount. |
@@ -20,15 +20,18 @@ per category, before the end of this period?
 | Refund | Money coming back on a specific expense. Reduces what that expense cost. |
 | Label | A category of spending (food, rent, transport). Can have a parent label. |
 | Envelope | The planned limit for a label inside a budget. One envelope per (budget, label). |
+| Planned total | The sum of a budget's envelope limits. Derived, never stored. |
 | Money | An amount, stored in minor units. |
 
 ## Scope
 
 ### Plan a budget
-- Create a budget for a period defined by a start date and an end date.
-- Set the global total amount of money available for that budget.
+- Create a budget for a period defined by a start date and an end date. A new
+  budget starts empty, with no envelopes.
 - Set a planned limit per label (an envelope), for example food 500.
-- The sum of envelope limits is allowed to differ from the budget total. Show
+- A budget has no limit of its own. Its planned total is the sum of its
+  envelope limits, so allocating more is always allowed and never rejected.
+- Compare the planned total against the income declared on the budget and show
   the gap instead of forbidding it.
 
 ### Declare money
@@ -56,7 +59,7 @@ where another kind is expected.
 
 **`Money(long minorUnits)`**
 An amount held in minor units (cents), so no floating point rounding. The
-constructor rejects any value that is not strictly positive. Currency is
+constructor rejects a negative value, so zero is a valid amount. Currency is
 deliberately absent: the domain does not carry currency logic.
 
 **`Period(LocalDate startDate, LocalDate endDate)`**
@@ -67,17 +70,35 @@ Both dates are required and `startDate` must not be after `endDate`.
 **`User(UserId userId, String firstname, String lastname, String email)`**
 All fields required.
 
-**`Budget(BudgetId budgetId, UserId ownerId, Period period, Money total)`**
-A budget belongs to one user, covers one period and carries the global total.
+**`Budget(BudgetId budgetId, UserId ownerId, Period period, Map<LabelId, Envelope> envelopes)`**
+A budget belongs to one user, covers one period and owns its envelopes. It is
+the aggregate root: an envelope is only ever reached through the budget that
+holds it.
 
-**`Label(LabelId labelId, Optional<LabelId> parentId, String name)`**
-A spending category. `parentId` is an explicit `Optional`, empty for a top
-level label and set for a sub label. The name cannot be blank and a label
-cannot be its own parent. Labels are global, not attached to a budget.
+Keying the map by `LabelId` makes "one envelope per label" true by
+construction, with no check to run and nothing to reject. It also keeps the
+reference to the other aggregate as an id, so a renamed label cannot leave a
+stale copy of itself inside a budget.
 
-**`Envelope(EnvelopeId envelopeId, BudgetId budgetId, LabelId labelId, Money limit)`**
-The join between a budget and a label, carrying the planned limit. This is what
-makes a label limit specific to one budget.
+Two behaviours, both pure:
+- `plannedTotal()` folds the envelope limits into a `Money`. The budget has no
+  total of its own, so there is nothing that can drift out of step with the
+  envelopes that produce it.
+- `withEnvelope(LabelId, Envelope)` returns a new budget with that envelope
+  added. Allocating again to a label that already has one replaces it.
+
+**`Label(LabelId labelId, Optional<LabelId> parentId, UserId userId, String name)`**
+A spending category, owned by one user. `parentId` is an explicit `Optional`,
+empty for a top level label and set for a sub label. The name cannot be blank
+and a label cannot be its own parent. A label is its own aggregate, not
+attached to a budget, and lives independently of the budgets that allocate to
+it.
+
+**`Envelope(EnvelopeId envelopeId, Money limit)`**
+The planned limit for one label inside one budget. It holds neither a
+`BudgetId` nor a `LabelId`: containment in `Budget.envelopes` carries the first
+and the map key carries the second, and a child repeating what its parent
+already states is a second source of truth that can disagree.
 
 ### Transactions
 
@@ -99,9 +120,14 @@ through `expenseId` and a refund cannot point at itself. It carries no
 `BudgetId`: the budget is the one of the expense it refunds.
 
 ### Derived values
-Consumed, remaining and available amounts are not stored on any record. They
-are computed from the transactions of a budget against the budget total and the
-envelope limits.
+No aggregate stores a figure it can compute. The planned total comes from the
+envelope limits, and the consumed, remaining and available amounts come from
+the transactions of a budget measured against those limits. A stored copy of a
+derived value is a copy that can go stale.
+
+Figures a screen needs but no aggregate owns, such as a label's name next to
+its envelope, belong to the read model. They are joined in the query use case
+or the web response record, never by putting label data inside a budget.
 
 ## Architecture
 
@@ -122,8 +148,40 @@ Driving ports live in `application/port/in` and are the use cases the web
 adapter calls. Driven ports live in `application/port/out` and are the
 interfaces the persistence and IBM i adapters implement.
 
-Current state: the domain records exist, the application and infrastructure
-packages are created and still empty.
+Services are plain constructor injected classes with no Spring annotation. They
+are wired by an explicit `@Bean` method per use case in `infrastructure/config`,
+which is what keeps the application layer framework free. Those `@Bean` methods
+do not null check their parameters: Spring never injects null, and a missing
+dependency fails the context at startup. Validation belongs to the class that
+owns the invariant, not to the wiring.
+
+### Current state
+
+Implemented, one vertical slice end to end:
+- Create a budget: `CreateBudgetUseCase` and `CreateBudgetCommand`, served by
+  `CreateBudgetService`, driven by `POST /budgets` through `BudgetController`,
+  persisted through `SaveBudgetPort` and `BudgetPersistenceAdapter`. Ids come
+  from `BudgetIdGenerator`, implemented by `UuidBudgetIdGenerator`.
+- Persistence mapping for the whole budget aggregate: `BudgetJpaEntity` owns
+  `EnvelopeJpaEntity` through a `@OneToMany` with cascade and orphan removal.
+  Both keep their JPA concerns inside the adapter package and convert with
+  `fromDomain` and `toDomain`.
+
+Not built yet:
+- No way to read a budget back. `LoadBudgetPort` is missing, so
+  `BudgetJpaEntity.toDomain` currently has no caller.
+- No `AddEnvelopeUseCase`, so envelopes cannot be created through the API. It
+  needs an `EnvelopeIdGenerator` out port mirroring `BudgetIdGenerator`.
+- Nothing for labels: no persistence, no use case, no endpoint. An envelope
+  needs a valid `LabelId`, and no referential check exists for it.
+- Nothing for transactions, users or authentication.
+- No error handling at the boundary. A rejected invariant surfaces as HTTP 500,
+  and `CreateBudgetRequest` carries no bean validation.
+- `src/test` is empty.
+
+An absent budget travels as an `Optional` from the port through the use case,
+and the controller is the only place that turns it into a 404. There is no
+not found exception type.
 
 ## IBM i (AS/400) integration
 
@@ -141,7 +199,9 @@ knows it exists.
 
 ## Technical stack
 
-- Java 25
+- Java 25. The build fails with `release version 25 not supported` unless
+  `JAVA_HOME` points at a JDK 25, which is not the default on every machine:
+  `JAVA_HOME=$(/usr/libexec/java_home -v 25) ./mvnw compile` on macOS.
 - Spring Boot 4.1.0: Web MVC, Data JPA, Security, Validation
 - PostgreSQL at runtime
 - JJWT 0.12.6 for JWT authentication
@@ -154,3 +214,20 @@ Build and run:
 ./mvnw test
 ./mvnw spring-boot:run
 ```
+
+## Frontend
+
+`frontend/` holds a Vite scaffold: React 19, TypeScript, oxlint for linting.
+Still the generated starter, with no router, no API client and no screen of the
+app yet.
+
+```
+cd frontend
+npm install
+npm run dev
+```
+
+Planned first screens: the budget list, a create budget form, and a budget
+detail page showing the planned total with one row per envelope and an add
+envelope form. The minor units conversion belongs in a single place in the API
+client, so no component does arithmetic on amounts.

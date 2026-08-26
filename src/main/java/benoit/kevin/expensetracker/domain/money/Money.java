@@ -5,8 +5,8 @@ package benoit.kevin.expensetracker.domain.money;
  */
 public record Money(long minorUnits) {
     public Money {
-        if (minorUnits <= 0) {
-            throw new IllegalArgumentException("minorUnits must be positive");
+        if (minorUnits < 0) {
+            throw new IllegalArgumentException("minorUnits must not be negative");
         }
     }
 }
