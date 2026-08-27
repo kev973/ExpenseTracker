@@ -24,7 +24,7 @@ public class CreateBudgetService implements CreateBudgetUseCase {
     @Override
     public BudgetId createBudget(CreateBudgetCommand command) {
         var budgetId = budgetIdGenerator.next();
-        var budget = new Budget(budgetId, command.owner(), command.period(), Map.of());
+        var budget = new Budget(budgetId, command.owner(), command.period());
         saveBudgetPort.save(budget);
         return budget.budgetId();
     }

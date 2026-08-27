@@ -5,17 +5,16 @@ import benoit.kevin.expensetracker.domain.user.UserId;
 import java.util.Objects;
 import java.util.Optional;
 
-public record Label(LabelId labelId, Optional<LabelId> parentId, UserId userId, String name) {
+public record Label(String name, Optional<String> parent, UserId userId) {
     public Label{
-        Objects.requireNonNull(labelId);
-        Objects.requireNonNull(parentId);
+        Objects.requireNonNull(parent);
         Objects.requireNonNull(userId);
         Objects.requireNonNull(name);
         if(name.isBlank()){
             throw new IllegalArgumentException("name cannot be blank");
         }
-        if(parentId.isPresent() && parentId.get().equals(labelId)){
-            throw new IllegalArgumentException("parentId cannot be the same as labelId");
+        if(parent.isPresent() && parent.get().equals(name)){
+            throw new IllegalArgumentException("parent cannot be the same as name");
         }
     }
 }
