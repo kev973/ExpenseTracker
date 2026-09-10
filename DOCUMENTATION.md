@@ -67,8 +67,10 @@ Both dates are required and `startDate` must not be after `endDate`.
 
 ### Entities
 
-**`User(UserId userId, String firstname, String lastname, String email)`**
-All fields required.
+**`User(UserId userId, String firstname, String lastname, String email, String passwordHash)`**
+All fields required; email and `passwordHash` cannot be blank. The record holds
+the hash and never computes one — hashing lives behind the `PasswordHasher`
+port.
 
 **`Budget(BudgetId budgetId, UserId ownerId, Period period, Map<LabelId, Envelope> envelopes)`**
 A budget belongs to one user, covers one period and owns its envelopes. It is
@@ -136,7 +138,8 @@ Hexagonal, three layers under `benoit.kevin.expensetracker`:
 ```
 domain/          budget, envelope, label, money, period, transaction, user
 application/     port/in, port/out, service
-infrastructure/  adapter/in/web, adapter/out/persistence, adapter/out/ibmi, config
+infrastructure/  adapter/in/web, adapter/out/persistence, adapter/out/security,
+                 adapter/out/id, adapter/out/ibmi, config
 ```
 
 The dependency rule points inward. `domain` depends on nothing outside itself.
@@ -149,7 +152,8 @@ adapter calls. Driven ports live in `application/port/out` and are the
 interfaces the persistence and IBM i adapters implement.
 
 Services are plain constructor injected classes with no Spring annotation. They
-are wired by an explicit `@Bean` method per use case in `infrastructure/config`,
+are wired by an explicit `@Bean` method per use case in
+`infrastructure/config/BeanConfiguration`,
 which is what keeps the application layer framework free. Those `@Bean` methods
 do not null check their parameters: Spring never injects null, and a missing
 dependency fails the context at startup. Validation belongs to the class that
@@ -157,31 +161,50 @@ owns the invariant, not to the wiring.
 
 ### Current state
 
-Implemented, one vertical slice end to end:
-- Create a budget: `CreateBudgetUseCase` and `CreateBudgetCommand`, served by
-  `CreateBudgetService`, driven by `POST /budgets` through `BudgetController`,
-  persisted through `SaveBudgetPort` and `BudgetPersistenceAdapter`. Ids come
-  from `BudgetIdGenerator`, implemented by `UuidBudgetIdGenerator`.
-- Persistence mapping for the whole budget aggregate: `BudgetJpaEntity` owns
-  `EnvelopeJpaEntity` through a `@OneToMany` with cascade and orphan removal.
-  Both keep their JPA concerns inside the adapter package and convert with
-  `fromDomain` and `toDomain`.
+Every use case below is implemented end to end and exercised by the test page.
+
+- **Authentication.** `AuthUseCase` / `AuthService`: self-serve registration and
+  login, returning a 24h HS256 JWT whose subject is the `UserId`. Password
+  hashing sits behind `PasswordHasher` and token signing behind `TokenIssuer`,
+  so the application layer knows *that* a password is checked, never *how*.
+  Unknown email and wrong password fail with the same message, so the endpoint
+  does not reveal which addresses are registered.
+- **Budgets.** Create, read, list, and allocate an envelope per label.
+- **Labels.** Create (optionally under a parent) and list.
+- **Transactions.** Record an expense, an income and a refund; list a budget's
+  transactions. A refund must point at an `Expense` and cannot exceed it.
+- **Summary.** `BudgetSummary` is computed in `BudgetService` from the loaded
+  aggregate plus the budget's transactions: planned total, income, consumed, and
+  one line per label with limit, consumed and remaining. Its amounts are plain
+  `long` minor units rather than `Money`, because remaining must be able to go
+  negative and `Money` forbids that by design.
+
+**Ownership is enforced in the services, not the controllers**, so a new
+endpoint cannot forget it. Every use case taking a `BudgetId` also takes the
+caller's `UserId`, compares it with `Budget.ownerId` and raises
+`NotOwnerException`, which the web layer turns into a 403. No request body or
+query string ever carries an owner id: it always comes from the token subject,
+read through the `CurrentUser` helper.
+
+**One use case interface and one service per aggregate.** Strict hexagonal would
+give each operation its own interface, command record and service — roughly 24
+files for the operations above, against 7 here. Commands are nested records
+inside their use case interface for the same reason. The trade-off is that a
+service has more than one reason to change; if one grows past about four
+methods, split it then.
+
+`IdGenerator` is a single out port returning a `UUID`, rather than one generator
+port per aggregate.
 
 Not built yet:
-- No way to read a budget back. `LoadBudgetPort` is missing, so
-  `BudgetJpaEntity.toDomain` currently has no caller.
-- No `AddEnvelopeUseCase`, so envelopes cannot be created through the API. It
-  needs an `EnvelopeIdGenerator` out port mirroring `BudgetIdGenerator`.
-- Nothing for labels: no persistence, no use case, no endpoint. An envelope
-  needs a valid `LabelId`, and no referential check exists for it.
-- Nothing for transactions, users or authentication.
-- No error handling at the boundary. A rejected invariant surfaces as HTTP 500,
-  and `CreateBudgetRequest` carries no bean validation.
-- `src/test` is empty.
-
-An absent budget travels as an `Optional` from the port through the use case,
-and the controller is the only place that turns it into a 404. There is no
-not found exception type.
+- Nothing for the IBM i integration beyond an empty package.
+- No refresh tokens, logout or revocation: a token is valid for 24 hours, full stop.
+- Labels cannot be renamed or deleted, and nothing checks that a budget's
+  envelopes still point at labels that exist.
+- No pagination anywhere.
+- Test coverage is deliberately thin: three service tests pinning the envelope,
+  refund and credential rules, with in-memory fakes of the ports and no Spring
+  context. There is no test of the web or persistence adapters.
 
 ## IBM i (AS/400) integration
 
@@ -202,9 +225,13 @@ knows it exists.
 - Java 25. The build fails with `release version 25 not supported` unless
   `JAVA_HOME` points at a JDK 25, which is not the default on every machine:
   `JAVA_HOME=$(/usr/libexec/java_home -v 25) ./mvnw compile` on macOS.
-- Spring Boot 4.1.0: Web MVC, Data JPA, Security, Validation
-- PostgreSQL at runtime
-- JJWT 0.12.6 for JWT authentication
+- Spring Boot 4.1.0: Web MVC, Data JPA, Security, Validation, OAuth2 Resource Server
+- PostgreSQL at runtime, started by `compose.yaml` and picked up by
+  `spring-boot-docker-compose`. The container publishes **5433** on the host,
+  because a locally installed Postgres already owns 5432.
+- JWT via Spring Security's own `JwtEncoder`/`JwtDecoder` (Nimbus), so there is
+  no third-party JWT library and no hand-written filter. The HS256 secret comes
+  from the `JWT_SECRET` environment variable, with a local-only default.
 - Maven, with the Maven wrapper included
 - Tests: Spring Boot JPA and Web MVC test starters, Spring Security test
 
@@ -217,17 +244,47 @@ Build and run:
 
 ## Frontend
 
-`frontend/` holds a Vite scaffold: React 19, TypeScript, oxlint for linting.
-Still the generated starter, with no router, no API client and no screen of the
-app yet.
+`frontend/` is a Vite + React 19 + TypeScript app. `npm run build` compiles it
+into `src/main/resources/static/`, so `./mvnw spring-boot:run` alone serves the
+UI; the built output is committed for that reason, and is regenerated rather
+than edited. While working on it, `npm run dev` proxies `/auth`, `/budgets`,
+`/labels` and `/transactions` to `localhost:8080`.
 
 ```
 cd frontend
 npm install
-npm run dev
+npm run dev      # development, with the API proxied
+npm run build    # regenerate what Spring serves
 ```
 
-Planned first screens: the budget list, a create budget form, and a budget
-detail page showing the planned total with one row per envelope and an add
-envelope form. The minor units conversion belongs in a single place in the API
-client, so no component does arithmetic on amounts.
+The token returned by register or login goes into `sessionStorage`; `src/api.ts`
+is the single place that attaches `Authorization: Bearer`, converts minor units,
+and turns a 401 into a signed-out state. No component does arithmetic on amounts.
+
+Animation uses `motion` (motion.dev): bars spring up on load, tiles and the
+error banner fade in. Everything is disabled under
+`prefers-reduced-motion: reduce`.
+
+### The chart
+
+One vertical bar per label — consumed against the planned limit, which is the
+question the app exists to answer.
+
+- **The limit is a target, not a series**, so it is always drawn as a dashed rule
+  across the bar rather than relying on a second fill being told apart from the
+  first. That matters most in dark mode, where the soft track and the bar sit
+  close together.
+- Colours come from a validated palette: series blue for consumed, status red
+  for an overspent envelope. Both were checked against the light and dark
+  surfaces with the data-viz palette validator (lightness band, chroma floor,
+  colour-blind separation, normal-vision separation, contrast).
+- **Overspend never relies on colour alone** — an overspent bar also carries a
+  `⚠ N over` direct label, and the legend gains an explicit entry.
+- Every bar carries its consumed value as a direct label, has a hover tooltip
+  with limit / consumed / remaining, and a hit target wider than the bar itself.
+- The transactions table below is the table view of the same data, and scrolls
+  inside its own container so the page never scrolls sideways.
+
+Dark mode is a selected palette, not an inverted one: every colour is defined on
+bare `:root` first, then re-declared under both `prefers-color-scheme: dark` and
+`[data-theme="dark"]`.
