@@ -1,0 +1,11 @@
+services:
+  db:
+    container_name: postgres
+    image: postgres:18
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      # 5432 on the host is taken by a locally installed Postgres.
+      - '5433:5432'
